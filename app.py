@@ -9,8 +9,8 @@ from sentence_transformers import SentenceTransformer
 from groq import Groq
 
 # ================= CONFIG =================
-st.set_page_config(page_title="Research AI Assistant", layout="wide")
-st.title("📚 AI Study Assistant")
+st.set_page_config(page_title="AI Assistant", layout="wide")
+st.title("📚 AI Assistant (RAG + Smart AI)")
 
 API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 client = Groq(api_key=API_KEY)
@@ -22,6 +22,12 @@ if "index" not in st.session_state:
     st.session_state.index = None
     st.session_state.chunks = None
     st.session_state.chat = []
+
+# ================= MODE =================
+mode = st.selectbox(
+    "Select Answer Mode",
+    ["Both", "PDF Only", "AI Only"]
+)
 
 # ================= FUNCTIONS =================
 
@@ -54,12 +60,10 @@ def retrieve(query, k=8):
 
     return results
 
-# 🔥 Relevance check
 def is_relevant(results, threshold=0.35):
     avg_score = sum(score for _, score in results) / len(results)
     return avg_score > threshold
 
-# 🔥 Sentence extraction
 def extract_best_sentences(text, query, max_sent=3):
     sentences = re.split(r'(?<=[.!?]) +', text)
     query_words = query.lower().split()
@@ -73,7 +77,6 @@ def extract_best_sentences(text, query, max_sent=3):
     scored.sort(key=lambda x: x[1], reverse=True)
     return [s for s, _ in scored[:max_sent]]
 
-# 🔥 Highlight
 def highlight(text, query):
     for word in query.split():
         if len(word) > 3:
@@ -85,14 +88,12 @@ def highlight(text, query):
             )
     return text
 
-# 🔥 Format sources
 def format_sources(results, query):
     formatted = []
 
     for i, (text, score) in enumerate(results):
         best_lines = extract_best_sentences(text, query)
         snippet = " ".join(best_lines)
-
         confidence = round(score * 100, 2)
 
         snippet = highlight(snippet, query)
@@ -101,7 +102,29 @@ def format_sources(results, query):
 
     return formatted
 
-# 🔥 PDF Answer
+# 🔥 QUERY SUGGESTIONS (NEW)
+def suggest_queries():
+    chunks = st.session_state.chunks[:5]
+    combined = " ".join(chunks)
+
+    prompt = f"""
+Based on this document, generate 3 relevant questions a user can ask.
+
+Document:
+{combined}
+
+Return only questions.
+"""
+
+    res = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    return res.choices[0].message.content
+
+# ================= AI =================
+
 def rag_answer(query):
     results = retrieve(query)
 
@@ -114,10 +137,7 @@ def rag_answer(query):
 
     prompt = f"""
 Answer using ONLY the context.
-
-Rules:
-- Use citations [1], [2]
-- Be detailed
+Use citations like [1], [2].
 
 Context:
 {context}
@@ -133,7 +153,6 @@ Answer:
 
     return res.choices[0].message.content, sources
 
-# 🔥 Fallback AI
 def general_answer(query):
     res = client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -141,7 +160,65 @@ def general_answer(query):
     )
     return res.choices[0].message.content
 
-# 🔥 Render sources
+# ================= UI =================
+
+uploaded = st.file_uploader("📂 Upload PDF", type=["pdf"])
+
+if uploaded and st.button("Process PDF"):
+    text = extract_text(uploaded)
+    chunks = chunk_text(text)
+    st.session_state.index = create_index(chunks)
+    st.session_state.chunks = chunks
+    st.success("✅ PDF processed")
+
+query = st.chat_input("Ask anything...")
+
+if query:
+    st.session_state.chat.append(("user", query))
+
+    has_pdf = st.session_state.index is not None
+    pdf_answer, sources = (None, None)
+    ai_answer = None
+
+    if has_pdf:
+        pdf_answer, sources = rag_answer(query)
+
+    if mode in ["Both", "AI Only"] or (mode == "PDF Only" and pdf_answer is None):
+        ai_answer = general_answer(query)
+
+    # ================= LOGIC =================
+
+    if mode == "Both":
+        if pdf_answer:
+            st.session_state.chat.append(("pdf", pdf_answer))
+            st.session_state.chat.append(("sources", sources))
+        if ai_answer:
+            st.session_state.chat.append(("ai", ai_answer))
+
+    elif mode == "PDF Only":
+        if pdf_answer:
+            st.session_state.chat.append(("pdf", pdf_answer))
+            st.session_state.chat.append(("sources", sources))
+        else:
+            suggestions = suggest_queries()
+
+            reason = f"""
+❌ This question is outside the document scope.
+
+Reason:
+- No semantically relevant content found
+- Answer requires external knowledge
+
+💡 Try asking:
+{suggestions}
+"""
+            st.session_state.chat.append(("pdf", reason))
+
+    elif mode == "AI Only":
+        st.session_state.chat.append(("ai", ai_answer))
+
+# ================= DISPLAY =================
+
 def render_sources(sources):
     html = ""
 
@@ -168,39 +245,6 @@ def render_sources(sources):
 
     components.html(html, height=600, scrolling=True)
 
-# ================= UI =================
-
-uploaded = st.file_uploader("📂 Upload PDF", type=["pdf"])
-
-if uploaded and st.button("Process PDF"):
-    text = extract_text(uploaded)
-    chunks = chunk_text(text)
-    st.session_state.index = create_index(chunks)
-    st.session_state.chunks = chunks
-    st.success("✅ PDF processed")
-
-query = st.chat_input("Ask anything...")
-
-if query:
-    st.session_state.chat.append(("user", query))
-
-    if st.session_state.index:
-        answer, sources = rag_answer(query)
-
-        # 🔥 FALLBACK LOGIC
-        if answer is None:
-            fallback = general_answer(query)
-
-            st.session_state.chat.append(("ai", fallback))
-        else:
-            st.session_state.chat.append(("pdf", answer))
-            st.session_state.chat.append(("sources", sources))
-    else:
-        fallback = general_answer(query)
-        st.session_state.chat.append(("ai", fallback))
-
-# ================= DISPLAY =================
-
 for item in st.session_state.chat:
 
     if item[0] == "user":
@@ -214,7 +258,7 @@ for item in st.session_state.chat:
 
     elif item[0] == "ai":
         with st.chat_message("assistant"):
-            st.markdown("🤖 **General AI Answer (Outside Document)**")
+            st.markdown("🤖 **General AI Answer**")
             st.markdown(item[1])
 
     elif item[0] == "sources":
