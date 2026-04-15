@@ -6,40 +6,28 @@ import os
 import re
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
-from dotenv import load_dotenv
 from groq import Groq
 
-# ================= SETUP =================
+# ================= CONFIG =================
+st.set_page_config(page_title="Research AI Assistant", layout="wide")
+st.title("📚 Research-Level AI Assistant (RAG + Explainable AI)")
 
-load_dotenv()
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+client = Groq(api_key=API_KEY)
 
 embed_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-st.set_page_config(page_title="AI Assistant", layout="wide")
-st.title("🤖 AI Assistant")
-
 # ================= SESSION =================
-
 if "index" not in st.session_state:
     st.session_state.index = None
     st.session_state.chunks = None
-
-if "chat" not in st.session_state:
     st.session_state.chat = []
 
-# ================= SIDEBAR =================
-
-mode = st.sidebar.radio("Mode", ["Both", "PDF Only", "General AI Only"])
-
-# ================= CORE =================
+# ================= FUNCTIONS =================
 
 def extract_text(file):
-    text = ""
     reader = PdfReader(file)
-    for p in reader.pages:
-        text += p.extract_text() or ""
-    return text
+    return "".join([p.extract_text() or "" for p in reader.pages])
 
 def chunk_text(text, size=800, overlap=200):
     chunks, start = [], 0
@@ -54,68 +42,72 @@ def create_index(chunks):
     index.add(np.array(emb))
     return index
 
-def retrieve(query, k=12):
+def retrieve(query, k=8):
     emb = embed_model.encode([query])
     D, I = st.session_state.index.search(np.array(emb), k)
     return [(st.session_state.chunks[i], float(D[0][idx])) for idx, i in enumerate(I[0])]
 
-# 🔥 RERANK
-def rerank(results, query):
-    q_words = set(query.lower().split())
-    ranked = []
-    for text, score in results:
-        keyword_score = sum(1 for w in q_words if w in text.lower())
-        final_score = keyword_score * 2 - score
-        ranked.append((text, final_score))
-    ranked.sort(key=lambda x: x[1], reverse=True)
-    return ranked[:5]
+# 🔥 Sentence-level scoring
+def extract_best_sentences(text, query, max_sent=3):
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    query_words = query.lower().split()
 
-# 🔥 HIGHLIGHT
+    scored = []
+    for s in sentences:
+        score = sum(1 for w in query_words if w in s.lower())
+        if len(s.strip()) > 40:
+            scored.append((s, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [s for s, _ in scored[:max_sent]]
+
+# 🔥 Highlight
 def highlight(text, query):
     for word in query.split():
         if len(word) > 3:
             text = re.sub(
                 f"({word})",
-                r"<span style='background-color:#FFD54F; color:black; font-weight:bold; padding:2px 4px; border-radius:4px;'>\1</span>",
+                r"<span style='background:#FFD54F; color:black; font-weight:bold;'>\1</span>",
                 text,
                 flags=re.IGNORECASE
             )
     return text
 
-# 🔥 FORMAT CONTEXT
-def format_context(ranked, query):
+# 🔥 Format sources
+def format_sources(results, query):
     formatted = []
-    for i, (text, _) in enumerate(ranked):
-        sentences = re.split(r'(?<=[.!?]) +', text)
-        snippet = " ".join(sentences[:5])
+
+    for i, (text, score) in enumerate(results):
+        best_lines = extract_best_sentences(text, query)
+        snippet = " ".join(best_lines)
+
+        confidence = round(100 - score, 2)
+
         snippet = highlight(snippet, query)
-        formatted.append((i+1, snippet, text))
+
+        formatted.append((i+1, snippet, text, confidence))
+
     return formatted
 
-# ================= LLM =================
-
-def general_answer(query):
-    res = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": query}]
-    )
-    return res.choices[0].message.content
-
+# 🔥 RAG Answer
 def rag_answer(query):
     results = retrieve(query)
-    ranked = rerank(results, query)
+    sources = format_sources(results, query)
 
-    context_text = "\n\n".join([t for t, _ in ranked])
+    context = "\n\n".join([f"[{i}] {t}" for i, _, t, _ in sources])
 
     prompt = f"""
-Answer using ONLY the context below.
-Also cite sources like [1], [2].
+Answer the question using the context.
+
+Rules:
+- Use citations like [1], [2]
+- Give detailed explanation
+- Be clear and structured
 
 Context:
-{context_text}
+{context}
 
 Question: {query}
-
 Answer:
 """
 
@@ -124,7 +116,35 @@ Answer:
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return res.choices[0].message.content, ranked
+    return res.choices[0].message.content, sources
+
+# 🔥 Render Sources (Clickable + Clean)
+def render_sources(sources):
+    html = ""
+
+    for idx, snippet, full_text, conf in sources:
+        html += f"""
+        <div id="source{idx}" style='margin-bottom:20px; padding:15px; border-radius:12px; background:#0f172a; border-left:5px solid #38bdf8'>
+
+            <div style='font-weight:bold; font-size:16px'>
+                📌 Source [{idx}] | Confidence: {conf}%
+            </div>
+
+            <div style='margin-top:8px'>
+                {snippet}
+            </div>
+
+            <details>
+                <summary style='cursor:pointer; color:#38bdf8'>Show Full Context</summary>
+                <div style='margin-top:10px; font-size:14px; color:#ccc'>
+                    {full_text}
+                </div>
+            </details>
+
+        </div>
+        """
+
+    components.html(html, height=600, scrolling=True)
 
 # ================= UI =================
 
@@ -135,72 +155,35 @@ if uploaded and st.button("Process PDF"):
     chunks = chunk_text(text)
     st.session_state.index = create_index(chunks)
     st.session_state.chunks = chunks
-    st.success("✅ PDF Ready!")
+    st.success("✅ PDF processed")
 
-query = st.chat_input("Ask anything...")
+query = st.chat_input("Ask a research question...")
 
 if query:
     st.session_state.chat.append(("user", query))
 
-    # 🤖 AI
-    if mode in ["Both", "General AI Only"]:
-        ans = general_answer(query)
-        st.session_state.chat.append(("bot", (
-            "🤖 AI GENERATED ANSWER",
-            f"<div style='background:#1e1e2f; padding:15px; border-radius:10px; border-left:5px solid #4CAF50'>{ans}</div>"
-        )))
+    if st.session_state.index:
+        answer, sources = rag_answer(query)
 
-    # 📄 PDF
-    if mode in ["Both", "PDF Only"] and st.session_state.index:
-        ans, ranked = rag_answer(query)
-        sources = format_context(ranked, query)
-
-        st.session_state.chat.append(("bot", (
-            "📄 ANSWER FROM DOCUMENT",
-            f"<div style='background:#2b1e1e; padding:15px; border-radius:10px; border-left:5px solid #FF9800'>{ans}</div>"
-        )))
-
+        st.session_state.chat.append(("answer", answer))
         st.session_state.chat.append(("sources", sources))
-
-    if mode in ["PDF Only", "Both"] and st.session_state.index is None:
-        st.session_state.chat.append(("bot", ("⚠️", "Upload PDF first")))
+    else:
+        st.session_state.chat.append(("answer", "⚠️ Upload PDF first"))
 
 # ================= DISPLAY =================
 
 for item in st.session_state.chat:
 
-    role = item[0]
-
-    if role == "user":
+    if item[0] == "user":
         with st.chat_message("user"):
             st.write(item[1])
 
-    elif role == "bot":
-        title, content = item[1]
+    elif item[0] == "answer":
         with st.chat_message("assistant"):
-            st.markdown(f"### {title}")
-            st.markdown(content, unsafe_allow_html=True)
+            st.markdown("## 🤖 Answer")
+            st.markdown(item[1])
 
-    elif role == "sources":
+    elif item[0] == "sources":
         with st.chat_message("assistant"):
-            st.markdown("## 📖 Detailed Sources")
-
-            source_html = ""
-
-            for idx, snippet, full_text in item[1]:
-                source_html += f"""
-                <details style='margin-bottom:10px; background:#0f172a; padding:10px; border-radius:10px'>
-                    <summary style='cursor:pointer; font-weight:bold'>
-                        📌 Source [{idx}] (Click to expand)
-                    </summary>
-
-                    <div style='padding:10px; margin-top:5px'>
-                        {snippet}
-                        <hr>
-                        <small style='color:gray'>Full Context:</small><br>
-                        {full_text}
-                    </div>
-                </details>
-                """
-
-            components.html(source_html, height=400, scrolling=True)
+            st.markdown("## 📖 Sources & Evidence")
+            render_sources(item[1])
