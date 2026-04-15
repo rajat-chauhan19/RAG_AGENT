@@ -22,6 +22,7 @@ if "index" not in st.session_state:
     st.session_state.index = None
     st.session_state.chunks = None
     st.session_state.chat = []
+    st.session_state.clicked_query = None
 
 # ================= MODE =================
 mode = st.selectbox("Select Answer Mode", ["Both", "PDF Only", "AI Only"])
@@ -95,23 +96,26 @@ def format_sources(results, query):
         formatted.append((i+1, snippet, text, confidence))
     return formatted
 
-# ✅ FIXED QUERY SUGGESTION
+# ================= QUERY SUGGESTIONS =================
+
 def suggest_queries():
     if not st.session_state.chunks:
-        return """• Upload a document first  
-• Ask questions from the PDF  
-• Or switch to AI mode"""
+        return [
+            "Upload a document first",
+            "Ask questions related to the PDF",
+            "Try switching to AI mode"
+        ]
 
     chunks = st.session_state.chunks[:5]
     combined = " ".join(chunks)
 
     prompt = f"""
-Based on this document, generate 3 relevant questions.
+Generate 3 meaningful questions based on this document.
 
 Document:
 {combined}
 
-Return only questions.
+Only return questions.
 """
 
     res = client.chat.completions.create(
@@ -119,7 +123,15 @@ Return only questions.
         messages=[{"role": "user", "content": prompt}]
     )
 
-    return res.choices[0].message.content
+    raw = res.choices[0].message.content
+
+    questions = []
+    for line in raw.split("\n"):
+        line = line.strip("-•1234567890. ")
+        if len(line) > 5:
+            questions.append(line)
+
+    return questions[:3]
 
 # ================= AI =================
 
@@ -171,6 +183,11 @@ if uploaded and st.button("Process PDF"):
 
 query = st.chat_input("Ask anything...")
 
+# 🔥 Auto-run clicked suggestion
+if st.session_state.clicked_query:
+    query = st.session_state.clicked_query
+    st.session_state.clicked_query = None
+
 if query:
     st.session_state.chat.append(("user", query))
 
@@ -199,18 +216,14 @@ if query:
             st.session_state.chat.append(("pdf", pdf_answer))
             st.session_state.chat.append(("sources", sources))
         else:
-            suggestions = suggest_queries()
-            reason = f"""
+            st.session_state.chat.append(("pdf", """
 ❌ This question is outside the document scope.
 
 Reason:
-- No relevant content found in PDF
+- No relevant content found
 - Requires external knowledge
-
-💡 Try:
-{suggestions}
-"""
-            st.session_state.chat.append(("pdf", reason))
+"""))
+            st.session_state.chat.append(("suggestions", suggest_queries()))
 
     elif mode == "AI Only":
         st.session_state.chat.append(("ai", ai_answer))
@@ -222,15 +235,12 @@ def render_sources(sources):
     for idx, snippet, full_text, conf in sources:
         html += f"""
         <div style='margin-bottom:20px; padding:15px; border-radius:12px; background:#0f172a; border-left:5px solid #38bdf8'>
-
             <div style='font-weight:bold'>
                 📌 Source [{idx}] | Confidence: {conf}%
             </div>
-
             <div style='margin-top:8px'>
                 {snippet}
             </div>
-
             <details>
                 <summary style='cursor:pointer; color:#38bdf8'>Full Context</summary>
                 <div style='margin-top:10px; color:#ccc'>
@@ -261,3 +271,10 @@ for item in st.session_state.chat:
         with st.chat_message("assistant"):
             st.markdown("📖 **Sources**")
             render_sources(item[1])
+
+    elif item[0] == "suggestions":
+        with st.chat_message("assistant"):
+            st.markdown("💡 **Suggested Questions**")
+            for q in item[1]:
+                if st.button(q):
+                    st.session_state.clicked_query = q
