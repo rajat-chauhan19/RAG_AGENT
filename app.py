@@ -97,6 +97,8 @@ def format_sources(results, query):
         formatted.append((i+1, snippet, text, confidence))
     return formatted
 
+# ================= QUERY SUGGESTIONS =================
+
 def suggest_queries():
     if not st.session_state.chunks:
         return [
@@ -140,7 +142,7 @@ def stream_output(text):
     for word in text.split():
         output += word + " "
         placeholder.markdown(output)
-        time.sleep(0.02)  # typing speed
+        time.sleep(0.02)
 
 # ================= AI =================
 
@@ -155,8 +157,13 @@ def rag_answer(query):
     context = "\n\n".join([f"[{i}] {t}" for i, _, t, _ in sources])
 
     prompt = f"""
-Answer ONLY from the context.
-Use citations [1], [2].
+Answer the question in a structured format:
+
+- Start with definition
+- Use headings
+- Use bullet points
+- Keep it clear and readable
+- Use citations [1], [2]
 
 Context:
 {context}
@@ -173,10 +180,22 @@ Answer:
     return res.choices[0].message.content, sources
 
 def general_answer(query):
+    prompt = f"""
+Answer in a structured format:
+
+- Definition
+- Key points
+- Examples (if needed)
+
+Question: {query}
+Answer:
+"""
+
     res = client.chat.completions.create(
         model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": query}]
+        messages=[{"role": "user", "content": prompt}]
     )
+
     return res.choices[0].message.content
 
 # ================= UI =================
@@ -192,6 +211,7 @@ if uploaded and st.button("Process PDF"):
 
 query = st.chat_input("Ask anything...")
 
+# auto run suggestion
 if st.session_state.clicked_query:
     query = st.session_state.clicked_query
     st.session_state.clicked_query = None
