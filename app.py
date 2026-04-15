@@ -24,10 +24,7 @@ if "index" not in st.session_state:
     st.session_state.chat = []
 
 # ================= MODE =================
-mode = st.selectbox(
-    "Select Answer Mode",
-    ["Both", "PDF Only", "AI Only"]
-)
+mode = st.selectbox("Select Answer Mode", ["Both", "PDF Only", "AI Only"])
 
 # ================= FUNCTIONS =================
 
@@ -61,8 +58,8 @@ def retrieve(query, k=8):
     return results
 
 def is_relevant(results, threshold=0.35):
-    avg_score = sum(score for _, score in results) / len(results)
-    return avg_score > threshold
+    avg = sum(score for _, score in results) / len(results)
+    return avg > threshold
 
 def extract_best_sentences(text, query, max_sent=3):
     sentences = re.split(r'(?<=[.!?]) +', text)
@@ -90,25 +87,26 @@ def highlight(text, query):
 
 def format_sources(results, query):
     formatted = []
-
     for i, (text, score) in enumerate(results):
         best_lines = extract_best_sentences(text, query)
         snippet = " ".join(best_lines)
         confidence = round(score * 100, 2)
-
         snippet = highlight(snippet, query)
-
         formatted.append((i+1, snippet, text, confidence))
-
     return formatted
 
-# 🔥 QUERY SUGGESTIONS (NEW)
+# ✅ FIXED QUERY SUGGESTION
 def suggest_queries():
+    if not st.session_state.chunks:
+        return """• Upload a document first  
+• Ask questions from the PDF  
+• Or switch to AI mode"""
+
     chunks = st.session_state.chunks[:5]
     combined = " ".join(chunks)
 
     prompt = f"""
-Based on this document, generate 3 relevant questions a user can ask.
+Based on this document, generate 3 relevant questions.
 
 Document:
 {combined}
@@ -136,8 +134,8 @@ def rag_answer(query):
     context = "\n\n".join([f"[{i}] {t}" for i, _, t, _ in sources])
 
     prompt = f"""
-Answer using ONLY the context.
-Use citations like [1], [2].
+Answer ONLY from the context.
+Use citations [1], [2].
 
 Context:
 {context}
@@ -177,6 +175,7 @@ if query:
     st.session_state.chat.append(("user", query))
 
     has_pdf = st.session_state.index is not None
+
     pdf_answer, sources = (None, None)
     ai_answer = None
 
@@ -201,15 +200,14 @@ if query:
             st.session_state.chat.append(("sources", sources))
         else:
             suggestions = suggest_queries()
-
             reason = f"""
 ❌ This question is outside the document scope.
 
 Reason:
-- No semantically relevant content found
-- Answer requires external knowledge
+- No relevant content found in PDF
+- Requires external knowledge
 
-💡 Try asking:
+💡 Try:
 {suggestions}
 """
             st.session_state.chat.append(("pdf", reason))
@@ -221,7 +219,6 @@ Reason:
 
 def render_sources(sources):
     html = ""
-
     for idx, snippet, full_text, conf in sources:
         html += f"""
         <div style='margin-bottom:20px; padding:15px; border-radius:12px; background:#0f172a; border-left:5px solid #38bdf8'>
@@ -242,7 +239,6 @@ def render_sources(sources):
             </details>
         </div>
         """
-
     components.html(html, height=600, scrolling=True)
 
 for item in st.session_state.chat:
