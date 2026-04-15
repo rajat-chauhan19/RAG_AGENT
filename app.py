@@ -17,7 +17,7 @@ client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 embed_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 st.set_page_config(page_title="AI Assistant", layout="wide")
-st.title("🤖 AI Assistant (Industry-Level RAG + Groq)")
+st.title("🤖 AI Assistant")
 
 # ================= SESSION =================
 
