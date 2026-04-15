@@ -4,6 +4,7 @@ import faiss
 import numpy as np
 import os
 import re
+import time
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from groq import Groq
@@ -96,8 +97,6 @@ def format_sources(results, query):
         formatted.append((i+1, snippet, text, confidence))
     return formatted
 
-# ================= QUERY SUGGESTIONS =================
-
 def suggest_queries():
     if not st.session_state.chunks:
         return [
@@ -132,6 +131,16 @@ Only return questions.
             questions.append(line)
 
     return questions[:3]
+
+# ================= STREAMING =================
+
+def stream_output(text):
+    placeholder = st.empty()
+    output = ""
+    for word in text.split():
+        output += word + " "
+        placeholder.markdown(output)
+        time.sleep(0.02)  # typing speed
 
 # ================= AI =================
 
@@ -183,7 +192,6 @@ if uploaded and st.button("Process PDF"):
 
 query = st.chat_input("Ask anything...")
 
-# 🔥 Auto-run clicked suggestion
 if st.session_state.clicked_query:
     query = st.session_state.clicked_query
     st.session_state.clicked_query = None
@@ -202,8 +210,6 @@ if query:
     if mode in ["Both", "AI Only"] or (mode == "PDF Only" and pdf_answer is None):
         ai_answer = general_answer(query)
 
-    # ================= LOGIC =================
-
     if mode == "Both":
         if pdf_answer:
             st.session_state.chat.append(("pdf", pdf_answer))
@@ -216,13 +222,7 @@ if query:
             st.session_state.chat.append(("pdf", pdf_answer))
             st.session_state.chat.append(("sources", sources))
         else:
-            st.session_state.chat.append(("pdf", """
-❌ This question is outside the document scope.
-
-Reason:
-- No relevant content found
-- Requires external knowledge
-"""))
+            st.session_state.chat.append(("pdf", "❌ Outside document scope"))
             st.session_state.chat.append(("suggestions", suggest_queries()))
 
     elif mode == "AI Only":
@@ -260,12 +260,12 @@ for item in st.session_state.chat:
     elif item[0] == "pdf":
         with st.chat_message("assistant"):
             st.markdown("📄 **Answer from Document**")
-            st.markdown(item[1])
+            stream_output(item[1])
 
     elif item[0] == "ai":
         with st.chat_message("assistant"):
             st.markdown("🤖 **General AI Answer**")
-            st.markdown(item[1])
+            stream_output(item[1])
 
     elif item[0] == "sources":
         with st.chat_message("assistant"):
@@ -274,7 +274,7 @@ for item in st.session_state.chat:
 
     elif item[0] == "suggestions":
         with st.chat_message("assistant"):
-            st.markdown("💡 **Suggested Questions**")
+            st.markdown("💡 Suggested Questions")
             for q in item[1]:
                 if st.button(q):
                     st.session_state.clicked_query = q
