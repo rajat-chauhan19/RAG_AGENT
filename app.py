@@ -10,7 +10,7 @@ from groq import Groq
 
 # ================= CONFIG =================
 st.set_page_config(page_title="Research AI Assistant", layout="wide")
-st.title("📚 Research-Level AI Assistant (RAG + Explainable AI)")
+st.title("📚 AI Assistant (RAG + Fallback AI)")
 
 API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 client = Groq(api_key=API_KEY)
@@ -45,9 +45,21 @@ def create_index(chunks):
 def retrieve(query, k=8):
     emb = embed_model.encode([query])
     D, I = st.session_state.index.search(np.array(emb), k)
-    return [(st.session_state.chunks[i], float(D[0][idx])) for idx, i in enumerate(I[0])]
 
-# 🔥 Sentence-level scoring
+    results = []
+    for idx, i in enumerate(I[0]):
+        distance = float(D[0][idx])
+        similarity = 1 / (1 + distance)
+        results.append((st.session_state.chunks[i], similarity))
+
+    return results
+
+# 🔥 Relevance check
+def is_relevant(results, threshold=0.35):
+    avg_score = sum(score for _, score in results) / len(results)
+    return avg_score > threshold
+
+# 🔥 Sentence extraction
 def extract_best_sentences(text, query, max_sent=3):
     sentences = re.split(r'(?<=[.!?]) +', text)
     query_words = query.lower().split()
@@ -81,7 +93,7 @@ def format_sources(results, query):
         best_lines = extract_best_sentences(text, query)
         snippet = " ".join(best_lines)
 
-        confidence = round(100 - score, 2)
+        confidence = round(score * 100, 2)
 
         snippet = highlight(snippet, query)
 
@@ -89,20 +101,23 @@ def format_sources(results, query):
 
     return formatted
 
-# 🔥 RAG Answer
+# 🔥 PDF Answer
 def rag_answer(query):
     results = retrieve(query)
+
+    if not is_relevant(results):
+        return None, None
+
     sources = format_sources(results, query)
 
     context = "\n\n".join([f"[{i}] {t}" for i, _, t, _ in sources])
 
     prompt = f"""
-Answer the question using the context.
+Answer using ONLY the context.
 
 Rules:
-- Use citations like [1], [2]
-- Give detailed explanation
-- Be clear and structured
+- Use citations [1], [2]
+- Be detailed
 
 Context:
 {context}
@@ -118,15 +133,23 @@ Answer:
 
     return res.choices[0].message.content, sources
 
-# 🔥 Render Sources (Clickable + Clean)
+# 🔥 Fallback AI
+def general_answer(query):
+    res = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": query}]
+    )
+    return res.choices[0].message.content
+
+# 🔥 Render sources
 def render_sources(sources):
     html = ""
 
     for idx, snippet, full_text, conf in sources:
         html += f"""
-        <div id="source{idx}" style='margin-bottom:20px; padding:15px; border-radius:12px; background:#0f172a; border-left:5px solid #38bdf8'>
+        <div style='margin-bottom:20px; padding:15px; border-radius:12px; background:#0f172a; border-left:5px solid #38bdf8'>
 
-            <div style='font-weight:bold; font-size:16px'>
+            <div style='font-weight:bold'>
                 📌 Source [{idx}] | Confidence: {conf}%
             </div>
 
@@ -135,12 +158,11 @@ def render_sources(sources):
             </div>
 
             <details>
-                <summary style='cursor:pointer; color:#38bdf8'>Show Full Context</summary>
-                <div style='margin-top:10px; font-size:14px; color:#ccc'>
+                <summary style='cursor:pointer; color:#38bdf8'>Full Context</summary>
+                <div style='margin-top:10px; color:#ccc'>
                     {full_text}
                 </div>
             </details>
-
         </div>
         """
 
@@ -157,7 +179,7 @@ if uploaded and st.button("Process PDF"):
     st.session_state.chunks = chunks
     st.success("✅ PDF processed")
 
-query = st.chat_input("Ask a research question...")
+query = st.chat_input("Ask anything...")
 
 if query:
     st.session_state.chat.append(("user", query))
@@ -165,10 +187,17 @@ if query:
     if st.session_state.index:
         answer, sources = rag_answer(query)
 
-        st.session_state.chat.append(("answer", answer))
-        st.session_state.chat.append(("sources", sources))
+        # 🔥 FALLBACK LOGIC
+        if answer is None:
+            fallback = general_answer(query)
+
+            st.session_state.chat.append(("ai", fallback))
+        else:
+            st.session_state.chat.append(("pdf", answer))
+            st.session_state.chat.append(("sources", sources))
     else:
-        st.session_state.chat.append(("answer", "⚠️ Upload PDF first"))
+        fallback = general_answer(query)
+        st.session_state.chat.append(("ai", fallback))
 
 # ================= DISPLAY =================
 
@@ -178,12 +207,17 @@ for item in st.session_state.chat:
         with st.chat_message("user"):
             st.write(item[1])
 
-    elif item[0] == "answer":
+    elif item[0] == "pdf":
         with st.chat_message("assistant"):
-            st.markdown("## 🤖 Answer")
+            st.markdown("📄 **Answer from Document**")
+            st.markdown(item[1])
+
+    elif item[0] == "ai":
+        with st.chat_message("assistant"):
+            st.markdown("🤖 **General AI Answer (Outside Document)**")
             st.markdown(item[1])
 
     elif item[0] == "sources":
         with st.chat_message("assistant"):
-            st.markdown("## 📖 Sources & Evidence")
+            st.markdown("📖 **Sources**")
             render_sources(item[1])
