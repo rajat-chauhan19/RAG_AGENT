@@ -10,7 +10,7 @@ from groq import Groq
 
 # ================= CONFIG =================
 st.set_page_config(page_title="Research AI Assistant", layout="wide")
-st.title("📚 AI Assistant (RAG + Fallback AI)")
+st.title("📚 AI Study Assistant")
 
 API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 client = Groq(api_key=API_KEY)
