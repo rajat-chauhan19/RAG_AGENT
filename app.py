@@ -13,6 +13,11 @@ GROQ_MODEL_NAME = "llama-3.3-70b-versatile"
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 TOP_K = 4
+ANSWER_MODES = (
+    "PDF only",
+    "AI only",
+    "AI + PDF",
+)
 
 load_dotenv()
 
@@ -111,7 +116,26 @@ def retrieve_relevant_chunks(query, index, chunk_records, top_k=TOP_K):
     return results
 
 
-def generate_rag_answer(query, api_key, index, chunk_records):
+def get_groq_client(api_key):
+    return Groq(api_key=api_key)
+
+
+def format_pages(pages):
+    if not pages:
+        return "Page information unavailable"
+    if len(pages) == 1:
+        return f"Page {pages[0]}"
+    return f"Pages {pages[0]}-{pages[-1]}"
+
+
+def format_source_preview(text, max_length=260):
+    preview = " ".join(text.split())
+    if len(preview) <= max_length:
+        return preview
+    return preview[: max_length - 3].rstrip() + "..."
+
+
+def generate_pdf_answer(query, api_key, index, chunk_records):
     if not query.strip():
         return "Please enter a valid question.", []
 
@@ -120,7 +144,7 @@ def generate_rag_answer(query, api_key, index, chunk_records):
         return "No relevant PDF content is available yet. Please upload and process a PDF first.", []
 
     context = "\n\n".join(chunk["content"] for chunk in retrieved_chunks)
-    client = Groq(api_key=api_key)
+    client = get_groq_client(api_key)
 
     prompt = f"""
 You are a helpful PDF question-answering assistant.
@@ -149,6 +173,73 @@ Question:
     return answer, retrieved_chunks
 
 
+def generate_ai_answer(query, api_key):
+    if not query.strip():
+        return "Please enter a valid question.", []
+
+    client = get_groq_client(api_key)
+    prompt = f"""
+You are a helpful AI assistant.
+Answer the user's question clearly and directly using your general knowledge.
+
+Question:
+{query}
+""".strip()
+
+    response = client.chat.completions.create(
+        model=GROQ_MODEL_NAME,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        temperature=0.3,
+    )
+
+    answer = response.choices[0].message.content.strip()
+    return answer, []
+
+
+def generate_combined_answer(query, api_key, index, chunk_records):
+    if not query.strip():
+        return "Please enter a valid question.", []
+
+    retrieved_chunks = retrieve_relevant_chunks(query, index, chunk_records)
+    context = "\n\n".join(chunk["content"] for chunk in retrieved_chunks) if retrieved_chunks else ""
+    client = get_groq_client(api_key)
+
+    prompt = f"""
+You are a helpful AI assistant.
+Answer the user's question by combining:
+1. Information from the uploaded PDFs when relevant.
+2. Your own general knowledge when useful.
+
+Be explicit when a point comes from the PDF context versus general AI knowledge.
+If no PDF context is available, answer using general knowledge and mention that no PDF evidence was found.
+
+PDF Context:
+{context if context else "No relevant PDF context found."}
+
+Question:
+{query}
+""".strip()
+
+    response = client.chat.completions.create(
+        model=GROQ_MODEL_NAME,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        temperature=0.3,
+    )
+
+    answer = response.choices[0].message.content.strip()
+    return answer, retrieved_chunks
+
+
 st.set_page_config(page_title="RAG AI Assistant", page_icon="📄", layout="wide")
 
 st.sidebar.title("Settings")
@@ -161,8 +252,10 @@ else:
     groq_api_key = st.sidebar.text_input("Enter Groq API Key", type="password")
     st.sidebar.caption("Tip: set GROQ_API_KEY in .env or Streamlit secrets to preload it.")
 
+answer_mode = st.sidebar.radio("Answer mode", ANSWER_MODES)
+
 st.title("AI PDF Assistant")
-st.markdown("Upload one or more PDFs and ask questions grounded in their content.")
+st.markdown("Upload one or more PDFs and choose whether answers come from the PDF, the AI model, or both.")
 
 uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
 
@@ -200,22 +293,33 @@ if query:
     if not groq_api_key:
         answer = "Please enter your Groq API key in the sidebar."
         sources = []
-    elif st.session_state.vector_index is None:
-        answer = "Please upload and process at least one PDF first."
-        sources = []
     else:
         try:
-            answer, sources = generate_rag_answer(
-                query,
-                groq_api_key,
-                st.session_state.vector_index,
-                st.session_state.chunk_records,
-            )
+            if answer_mode == "PDF only":
+                if st.session_state.vector_index is None:
+                    answer = "Please upload and process at least one PDF first."
+                    sources = []
+                else:
+                    answer, sources = generate_pdf_answer(
+                        query,
+                        groq_api_key,
+                        st.session_state.vector_index,
+                        st.session_state.chunk_records,
+                    )
+            elif answer_mode == "AI only":
+                answer, sources = generate_ai_answer(query, groq_api_key)
+            else:
+                answer, sources = generate_combined_answer(
+                    query,
+                    groq_api_key,
+                    st.session_state.vector_index,
+                    st.session_state.chunk_records,
+                )
         except Exception as exc:
             answer = f"Error while generating an answer: {exc}"
             sources = []
 
-    st.session_state.chat_history.append(("assistant", answer, sources))
+    st.session_state.chat_history.append(("assistant", f"Mode: {answer_mode}\n\n{answer}", sources))
 
 
 for role, content, sources in st.session_state.chat_history:
@@ -223,8 +327,19 @@ for role, content, sources in st.session_state.chat_history:
         st.markdown(content)
 
         if role == "assistant" and sources:
-            with st.expander("Sources"):
-                for item in sources:
-                    pages = ", ".join(str(page) for page in item["pages"][:5])
-                    suffix = "..." if len(item["pages"]) > 5 else ""
-                    st.write(f"- {item['source']} (pages: {pages}{suffix})")
+            with st.expander(f"Sources and evidence ({len(sources)})"):
+                st.caption("These PDF excerpts were retrieved to support the answer.")
+                for index, item in enumerate(sources, start=1):
+                    st.markdown(
+                        f"""
+**Source {index}: {item['source']}**
+
+`{format_pages(item['pages'])}` | `{len(item['content'])} characters retrieved`
+
+**Why this matters:** This is one of the most relevant PDF passages matched to your question.
+
+**Preview:** {format_source_preview(item['content'])}
+"""
+                    )
+                    if index != len(sources):
+                        st.divider()
