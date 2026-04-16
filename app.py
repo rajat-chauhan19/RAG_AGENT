@@ -149,8 +149,16 @@ def should_show_sources(answer, sources):
         "no relevant pdf context",
         "cannot be determined from the uploaded pdf",
         "can't be determined from the uploaded pdf",
+        "pdf-based answer: no relevant information found in the uploaded pdfs",
     ]
     return not any(signal in normalized_answer for signal in no_context_signals)
+
+
+def combined_answer_has_pdf_evidence(answer):
+    normalized_answer = answer.lower()
+    return "pdf-based answer" in normalized_answer and (
+        "no relevant information found in the uploaded pdfs" not in normalized_answer
+    )
 
 
 def generate_pdf_answer(query, api_key, index, chunk_records):
@@ -234,16 +242,16 @@ def generate_combined_answer(query, api_key, index, chunk_records):
 
     prompt = f"""
 You are a helpful AI assistant.
-Answer the user's question by combining:
-1. Information from the uploaded PDFs when relevant.
-2. Your own general knowledge when useful.
+Answer the user's question in exactly two sections with these headings:
+1. PDF-based answer
+2. AI-based answer
 
-Be explicit when a point comes from the PDF context versus general AI knowledge.
-If no PDF context is available, answer using general knowledge and mention that no PDF evidence was found.
-Write the answer in a polished structure:
-- Begin with a short summary paragraph.
-- Use bullet points to separate PDF-based points from general AI knowledge where appropriate.
-- Keep the tone clear, explanatory, and not overly brief.
+Rules:
+- In the PDF-based answer section, use only the uploaded PDF context.
+- If the PDF context does not support the answer, write exactly: "No relevant information found in the uploaded PDFs."
+- In the AI-based answer section, answer using general knowledge in a clear and well-structured way.
+- Keep the AI-based answer readable with a short paragraph followed by bullet points when helpful.
+- Do not merge the two sections together.
 
 PDF Context:
 {context if context else "No relevant PDF context found."}
@@ -353,7 +361,11 @@ for role, content, sources in st.session_state.chat_history:
     with st.chat_message("user" if role == "user" else "assistant"):
         st.markdown(content)
 
-        if role == "assistant" and should_show_sources(content, sources):
+        show_sources = role == "assistant" and should_show_sources(content, sources)
+        if show_sources and "Mode: AI + PDF" in content:
+            show_sources = combined_answer_has_pdf_evidence(content)
+
+        if show_sources:
             with st.expander(f"Sources and evidence ({len(sources)})"):
                 st.caption("These PDF excerpts were retrieved to support the answer.")
                 for index, item in enumerate(sources, start=1):
