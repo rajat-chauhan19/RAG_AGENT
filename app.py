@@ -11,11 +11,11 @@ from groq import Groq
 # ================= CONFIG =================
 st.set_page_config(page_title="RAGenius AI", page_icon="🤖", layout="wide")
 
-# ================= CUSTOM UI =================
+# ================= UI STYLE =================
 st.markdown("""
 <style>
 .chat-card {
-    padding: 15px;
+    padding: 12px;
     border-radius: 12px;
     margin-bottom: 10px;
 }
@@ -51,7 +51,7 @@ if "index" not in st.session_state:
     st.session_state.clicked_query = None
 
 # ================= MODE =================
-mode = st.selectbox("Select Answer Mode", ["Both", "PDF Only", "AI Only"])
+mode = st.selectbox("Mode", ["Both", "PDF Only", "AI Only"])
 
 # ================= FUNCTIONS =================
 
@@ -72,51 +72,39 @@ def create_index(chunks):
     index.add(np.array(emb))
     return index
 
-def retrieve(query, k=8):
+def retrieve(query, k=6):
     emb = embed_model.encode([query])
     D, I = st.session_state.index.search(np.array(emb), k)
 
     results = []
     for idx, i in enumerate(I[0]):
-        distance = float(D[0][idx])
-        similarity = 1 / (1 + distance)
+        similarity = 1 / (1 + float(D[0][idx]))
         results.append((st.session_state.chunks[i], similarity))
 
     return results
 
 def is_relevant(results, threshold=0.35):
-    avg = sum(score for _, score in results) / len(results)
-    return avg > threshold
+    return sum(score for _, score in results)/len(results) > threshold
 
 def format_sources(results):
-    formatted = []
-    for i, (text, score) in enumerate(results):
-        confidence = round(score * 100, 2)
-        formatted.append((i+1, text[:300], confidence))
-    return formatted
+    return [(i+1, txt[:300], round(score*100,2)) for i,(txt,score) in enumerate(results)]
 
 # ================= SUGGESTIONS =================
 
 def suggest_queries():
     if not st.session_state.chunks:
-        return ["Upload a PDF first", "Ask from document", "Switch to AI mode"]
-
-    return [
-        "Explain main concept of document",
-        "Give summary of document",
-        "What are key points?"
-    ]
+        return ["Upload a PDF first", "Ask document questions", "Switch to AI mode"]
+    return ["Give summary", "Explain main concept", "List key points"]
 
 # ================= AI =================
 
 def rag_answer(query):
     results = retrieve(query)
-
     if not is_relevant(results):
         return None, None
 
     sources = format_sources(results)
-    context = "\n\n".join([f"[{i}] {t}" for i, t, _ in sources])
+    context = "\n\n".join([f"[{i}] {t}" for i,t,_ in sources])
 
     prompt = f"""
 Answer ONLY from context.
@@ -125,6 +113,7 @@ Answer ONLY from context.
 ...
 
 ### 🔑 Key Points
+- ...
 - ...
 
 ### 📌 Explanation
@@ -146,14 +135,16 @@ Answer:
 
     return res.choices[0].message.content, sources
 
+
 def general_answer(query):
     prompt = f"""
-Answer in structured format:
+Answer in structured Markdown:
 
 ### 📘 Definition
 ...
 
 ### 🔑 Key Points
+- ...
 - ...
 
 ### 📌 Explanation
@@ -184,7 +175,7 @@ if uploaded and st.button("Process PDF"):
     st.session_state.chunks = chunks
     st.success("✅ PDF processed")
 
-query = st.chat_input("Ask anything...")
+query = st.chat_input("Ask something...")
 
 if st.session_state.clicked_query:
     query = st.session_state.clicked_query
@@ -194,33 +185,32 @@ if query:
     st.session_state.chat.append(("user", query))
 
     has_pdf = st.session_state.index is not None
-
-    pdf_answer, sources = (None, None)
-    ai_answer = None
+    pdf_ans, sources = (None, None)
+    ai_ans = None
 
     if has_pdf:
-        pdf_answer, sources = rag_answer(query)
+        pdf_ans, sources = rag_answer(query)
 
-    if mode in ["Both", "AI Only"] or (mode == "PDF Only" and pdf_answer is None):
-        ai_answer = general_answer(query)
+    if mode in ["Both", "AI Only"] or (mode=="PDF Only" and not pdf_ans):
+        ai_ans = general_answer(query)
 
     if mode == "Both":
-        if pdf_answer:
-            st.session_state.chat.append(("pdf", pdf_answer))
+        if pdf_ans:
+            st.session_state.chat.append(("pdf", pdf_ans))
             st.session_state.chat.append(("sources", sources))
-        if ai_answer:
-            st.session_state.chat.append(("ai", ai_answer))
+        if ai_ans:
+            st.session_state.chat.append(("ai", ai_ans))
 
     elif mode == "PDF Only":
-        if pdf_answer:
-            st.session_state.chat.append(("pdf", pdf_answer))
+        if pdf_ans:
+            st.session_state.chat.append(("pdf", pdf_ans))
             st.session_state.chat.append(("sources", sources))
         else:
             st.session_state.chat.append(("pdf", "❌ Out of document scope"))
             st.session_state.chat.append(("suggestions", suggest_queries()))
 
-    elif mode == "AI Only":
-        st.session_state.chat.append(("ai", ai_answer))
+    else:
+        st.session_state.chat.append(("ai", ai_ans))
 
 # ================= DISPLAY =================
 
@@ -230,15 +220,17 @@ for item in st.session_state.chat:
         st.markdown(f"<div class='chat-card user-card'>👤 {item[1]}</div>", unsafe_allow_html=True)
 
     elif item[0] == "pdf":
-        st.markdown(f"<div class='chat-card pdf-card'>📄 {item[1]}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='chat-card pdf-card'>📄 Answer from Document</div>", unsafe_allow_html=True)
+        st.markdown(item[1])  # ✅ FIXED
 
     elif item[0] == "ai":
-        st.markdown(f"<div class='chat-card ai-card'>🤖 {item[1]}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='chat-card ai-card'>🤖 AI Answer</div>", unsafe_allow_html=True)
+        st.markdown(item[1])  # ✅ FIXED
 
     elif item[0] == "sources":
         st.markdown("### 📖 Sources")
-        for idx, text, conf in item[1]:
-            st.markdown(f"**[{idx}] ({conf}% confidence)** {text}")
+        for i, txt, conf in item[1]:
+            st.markdown(f"**[{i}] ({conf}%)** {txt}")
 
     elif item[0] == "suggestions":
         st.markdown("### 💡 Suggestions")
