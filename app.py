@@ -4,15 +4,40 @@ import faiss
 import numpy as np
 import os
 import re
-import time
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from groq import Groq
 
 # ================= CONFIG =================
-st.set_page_config(page_title="AI Assistant", layout="wide")
-st.title("📚 AI Assistant (RAG + Smart AI)")
+st.set_page_config(page_title="RAGenius AI", page_icon="🤖", layout="wide")
 
+# ================= CUSTOM UI =================
+st.markdown("""
+<style>
+.chat-card {
+    padding: 15px;
+    border-radius: 12px;
+    margin-bottom: 10px;
+}
+.user-card {
+    background-color: #1e293b;
+    border-left: 5px solid #38bdf8;
+}
+.ai-card {
+    background-color: #0f172a;
+    border-left: 5px solid #4CAF50;
+}
+.pdf-card {
+    background-color: #0f172a;
+    border-left: 5px solid orange;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🤖 RAGenius AI")
+st.caption("Smart PDF + AI Assistant")
+
+# ================= API =================
 API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 client = Groq(api_key=API_KEY)
 
@@ -63,86 +88,24 @@ def is_relevant(results, threshold=0.35):
     avg = sum(score for _, score in results) / len(results)
     return avg > threshold
 
-def extract_best_sentences(text, query, max_sent=3):
-    sentences = re.split(r'(?<=[.!?]) +', text)
-    query_words = query.lower().split()
-
-    scored = []
-    for s in sentences:
-        score = sum(1 for w in query_words if w in s.lower())
-        if len(s.strip()) > 40:
-            scored.append((s, score))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [s for s, _ in scored[:max_sent]]
-
-def highlight(text, query):
-    for word in query.split():
-        if len(word) > 3:
-            text = re.sub(
-                f"({word})",
-                r"<span style='background:#FFD54F; color:black; font-weight:bold;'>\1</span>",
-                text,
-                flags=re.IGNORECASE
-            )
-    return text
-
-def format_sources(results, query):
+def format_sources(results):
     formatted = []
     for i, (text, score) in enumerate(results):
-        best_lines = extract_best_sentences(text, query)
-        snippet = " ".join(best_lines)
         confidence = round(score * 100, 2)
-        snippet = highlight(snippet, query)
-        formatted.append((i+1, snippet, text, confidence))
+        formatted.append((i+1, text[:300], confidence))
     return formatted
 
-# ================= QUERY SUGGESTIONS =================
+# ================= SUGGESTIONS =================
 
 def suggest_queries():
     if not st.session_state.chunks:
-        return [
-            "Upload a document first",
-            "Ask questions related to the PDF",
-            "Try switching to AI mode"
-        ]
+        return ["Upload a PDF first", "Ask from document", "Switch to AI mode"]
 
-    chunks = st.session_state.chunks[:5]
-    combined = " ".join(chunks)
-
-    prompt = f"""
-Generate 3 meaningful questions based on this document.
-
-Document:
-{combined}
-
-Only return questions.
-"""
-
-    res = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    raw = res.choices[0].message.content
-
-    questions = []
-    for line in raw.split("\n"):
-        line = line.strip("-•1234567890. ")
-        if len(line) > 5:
-            questions.append(line)
-
-    return questions[:3]
-
-# ================= STREAMING =================
-
-def stream_output(text):
-    placeholder = st.empty()
-    output = ""
-    for word in text.split():
-        output += word + " "
-        placeholder.markdown(output)
-        time.sleep(0.02)
+    return [
+        "Explain main concept of document",
+        "Give summary of document",
+        "What are key points?"
+    ]
 
 # ================= AI =================
 
@@ -152,18 +115,22 @@ def rag_answer(query):
     if not is_relevant(results):
         return None, None
 
-    sources = format_sources(results, query)
-
-    context = "\n\n".join([f"[{i}] {t}" for i, _, t, _ in sources])
+    sources = format_sources(results)
+    context = "\n\n".join([f"[{i}] {t}" for i, t, _ in sources])
 
     prompt = f"""
-Answer the question in a structured format:
+Answer ONLY from context.
 
-- Start with definition
-- Use headings
-- Use bullet points
-- Keep it clear and readable
-- Use citations [1], [2]
+### 📘 Definition
+...
+
+### 🔑 Key Points
+- ...
+
+### 📌 Explanation
+...
+
+Use citations [1], [2].
 
 Context:
 {context}
@@ -173,7 +140,7 @@ Answer:
 """
 
     res = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="llama-3.1-70b-versatile",
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -181,18 +148,26 @@ Answer:
 
 def general_answer(query):
     prompt = f"""
-Answer in a structured format:
+Answer in structured format:
 
-- Definition
-- Key points
-- Examples (if needed)
+### 📘 Definition
+...
+
+### 🔑 Key Points
+- ...
+
+### 📌 Explanation
+...
+
+### 🌍 Examples
+- ...
 
 Question: {query}
 Answer:
 """
 
     res = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model="llama-3.1-70b-versatile",
         messages=[{"role": "user", "content": prompt}]
     )
 
@@ -211,7 +186,6 @@ if uploaded and st.button("Process PDF"):
 
 query = st.chat_input("Ask anything...")
 
-# auto run suggestion
 if st.session_state.clicked_query:
     query = st.session_state.clicked_query
     st.session_state.clicked_query = None
@@ -242,7 +216,7 @@ if query:
             st.session_state.chat.append(("pdf", pdf_answer))
             st.session_state.chat.append(("sources", sources))
         else:
-            st.session_state.chat.append(("pdf", "❌ Outside document scope"))
+            st.session_state.chat.append(("pdf", "❌ Out of document scope"))
             st.session_state.chat.append(("suggestions", suggest_queries()))
 
     elif mode == "AI Only":
@@ -250,51 +224,24 @@ if query:
 
 # ================= DISPLAY =================
 
-def render_sources(sources):
-    html = ""
-    for idx, snippet, full_text, conf in sources:
-        html += f"""
-        <div style='margin-bottom:20px; padding:15px; border-radius:12px; background:#0f172a; border-left:5px solid #38bdf8'>
-            <div style='font-weight:bold'>
-                📌 Source [{idx}] | Confidence: {conf}%
-            </div>
-            <div style='margin-top:8px'>
-                {snippet}
-            </div>
-            <details>
-                <summary style='cursor:pointer; color:#38bdf8'>Full Context</summary>
-                <div style='margin-top:10px; color:#ccc'>
-                    {full_text}
-                </div>
-            </details>
-        </div>
-        """
-    components.html(html, height=600, scrolling=True)
-
 for item in st.session_state.chat:
 
     if item[0] == "user":
-        with st.chat_message("user"):
-            st.write(item[1])
+        st.markdown(f"<div class='chat-card user-card'>👤 {item[1]}</div>", unsafe_allow_html=True)
 
     elif item[0] == "pdf":
-        with st.chat_message("assistant"):
-            st.markdown("📄 **Answer from Document**")
-            stream_output(item[1])
+        st.markdown(f"<div class='chat-card pdf-card'>📄 {item[1]}</div>", unsafe_allow_html=True)
 
     elif item[0] == "ai":
-        with st.chat_message("assistant"):
-            st.markdown("🤖 **General AI Answer**")
-            stream_output(item[1])
+        st.markdown(f"<div class='chat-card ai-card'>🤖 {item[1]}</div>", unsafe_allow_html=True)
 
     elif item[0] == "sources":
-        with st.chat_message("assistant"):
-            st.markdown("📖 **Sources**")
-            render_sources(item[1])
+        st.markdown("### 📖 Sources")
+        for idx, text, conf in item[1]:
+            st.markdown(f"**[{idx}] ({conf}% confidence)** {text}")
 
     elif item[0] == "suggestions":
-        with st.chat_message("assistant"):
-            st.markdown("💡 Suggested Questions")
-            for q in item[1]:
-                if st.button(q):
-                    st.session_state.clicked_query = q
+        st.markdown("### 💡 Suggestions")
+        for q in item[1]:
+            if st.button(q):
+                st.session_state.clicked_query = q
