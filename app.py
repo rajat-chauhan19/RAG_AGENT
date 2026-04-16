@@ -1,6 +1,8 @@
 import faiss
 import numpy as np
+import os
 import streamlit as st
+from dotenv import load_dotenv
 from groq import Groq
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
@@ -12,10 +14,18 @@ CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 TOP_K = 4
 
+load_dotenv()
+
 
 @st.cache_resource
 def load_embedder():
     return SentenceTransformer(EMBED_MODEL_NAME)
+
+
+def get_configured_api_key():
+    secret_key = st.secrets.get("GROQ_API_KEY", "")
+    env_key = os.getenv("GROQ_API_KEY", "")
+    return secret_key or env_key
 
 
 def extract_text_from_pdfs(files):
@@ -142,7 +152,14 @@ Question:
 st.set_page_config(page_title="RAG AI Assistant", page_icon="📄", layout="wide")
 
 st.sidebar.title("Settings")
-groq_api_key = st.sidebar.text_input("Enter Groq API Key", type="password")
+configured_api_key = get_configured_api_key()
+
+if configured_api_key:
+    groq_api_key = configured_api_key
+    st.sidebar.success("Groq API key loaded automatically.")
+else:
+    groq_api_key = st.sidebar.text_input("Enter Groq API Key", type="password")
+    st.sidebar.caption("Tip: set GROQ_API_KEY in .env or Streamlit secrets to preload it.")
 
 st.title("AI PDF Assistant")
 st.markdown("Upload one or more PDFs and ask questions grounded in their content.")
