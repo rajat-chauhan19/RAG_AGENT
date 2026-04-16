@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 
 
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
-GROQ_MODEL_NAME = "llama3-70b-8192"
+GROQ_MODEL_NAME = "llama-3.3-70b-versatile"
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 TOP_K = 4
