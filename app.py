@@ -1,123 +1,213 @@
+import faiss
+import numpy as np
 import streamlit as st
 from groq import Groq
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.document_loaders import PyPDFLoader
-import os
+from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer
 
-# -------------------- CONFIG --------------------
-st.set_page_config(page_title="RAG AI Assistant", page_icon="🤖", layout="wide")
 
-# -------------------- SIDEBAR --------------------
-st.sidebar.title("⚙️ Settings")
+EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+GROQ_MODEL_NAME = "llama3-70b-8192"
+CHUNK_SIZE = 800
+CHUNK_OVERLAP = 150
+TOP_K = 4
+
+
+@st.cache_resource
+def load_embedder():
+    return SentenceTransformer(EMBED_MODEL_NAME)
+
+
+def extract_text_from_pdfs(files):
+    documents = []
+
+    for file in files:
+        reader = PdfReader(file)
+        page_text = []
+
+        for page_number, page in enumerate(reader.pages, start=1):
+            text = page.extract_text() or ""
+            if text.strip():
+                page_text.append((page_number, text))
+
+        combined_text = "\n".join(text for _, text in page_text).strip()
+        if combined_text:
+            documents.append(
+                {
+                    "source": file.name,
+                    "pages": [page for page, _ in page_text],
+                    "text": combined_text,
+                }
+            )
+
+    return documents
+
+
+def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    chunks = []
+    start = 0
+
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start += max(1, chunk_size - overlap)
+
+    return chunks
+
+
+def build_vectorstore(documents):
+    embedder = load_embedder()
+    chunk_records = []
+
+    for doc in documents:
+        for chunk in chunk_text(doc["text"]):
+            chunk_records.append(
+                {
+                    "source": doc["source"],
+                    "pages": doc["pages"],
+                    "content": chunk,
+                }
+            )
+
+    if not chunk_records:
+        return None, []
+
+    embeddings = embedder.encode(
+        [record["content"] for record in chunk_records],
+        convert_to_numpy=True,
+    ).astype("float32")
+
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
+
+    return index, chunk_records
+
+
+def retrieve_relevant_chunks(query, index, chunk_records, top_k=TOP_K):
+    if index is None or not chunk_records:
+        return []
+
+    embedder = load_embedder()
+    query_embedding = embedder.encode([query], convert_to_numpy=True).astype("float32")
+    _, indices = index.search(query_embedding, min(top_k, len(chunk_records)))
+
+    results = []
+    for idx in indices[0]:
+        if 0 <= idx < len(chunk_records):
+            results.append(chunk_records[idx])
+
+    return results
+
+
+def generate_rag_answer(query, api_key, index, chunk_records):
+    if not query.strip():
+        return "Please enter a valid question.", []
+
+    retrieved_chunks = retrieve_relevant_chunks(query, index, chunk_records)
+    if not retrieved_chunks:
+        return "No relevant PDF content is available yet. Please upload and process a PDF first.", []
+
+    context = "\n\n".join(chunk["content"] for chunk in retrieved_chunks)
+    client = Groq(api_key=api_key)
+
+    prompt = f"""
+You are a helpful PDF question-answering assistant.
+Answer the user's question using only the provided context.
+If the answer is not present in the context, say "I don't know based on the uploaded PDFs."
+
+Context:
+{context}
+
+Question:
+{query}
+""".strip()
+
+    response = client.chat.completions.create(
+        model=GROQ_MODEL_NAME,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ],
+        temperature=0.2,
+    )
+
+    answer = response.choices[0].message.content.strip()
+    return answer, retrieved_chunks
+
+
+st.set_page_config(page_title="RAG AI Assistant", page_icon="📄", layout="wide")
+
+st.sidebar.title("Settings")
 groq_api_key = st.sidebar.text_input("Enter Groq API Key", type="password")
 
-# -------------------- TITLE --------------------
-st.title("🤖 AI PDF Assistant (RAG)")
-st.markdown("Ask questions based on your uploaded PDFs")
+st.title("AI PDF Assistant")
+st.markdown("Upload one or more PDFs and ask questions grounded in their content.")
 
-# -------------------- FILE UPLOAD --------------------
-uploaded_files = st.file_uploader("📄 Upload PDFs", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
 
-# -------------------- INIT SESSION --------------------
-if "vectorstore" not in st.session_state:
-    st.session_state.vectorstore = None
+if "vector_index" not in st.session_state:
+    st.session_state.vector_index = None
+
+if "chunk_records" not in st.session_state:
+    st.session_state.chunk_records = []
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# -------------------- PROCESS PDFs --------------------
-def process_pdfs(files):
-    documents = []
 
-    for file in files:
-        with open(file.name, "wb") as f:
-            f.write(file.getbuffer())
-
-        loader = PyPDFLoader(file.name)
-        docs = loader.load()
-        documents.extend(docs)
-
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_documents(documents)
-
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    vectorstore = FAISS.from_documents(chunks, embeddings)
-
-    return vectorstore
-
-# -------------------- RAG FUNCTION --------------------
-def rag_answer(query, vectorstore, client):
-    if not query or query.strip() == "":
-        return "⚠️ Please enter a valid question.", []
-
-    try:
-        docs = vectorstore.similarity_search(query, k=3)
-
-        context = "\n\n".join([doc.page_content for doc in docs])
-
-        prompt = f"""
-        Answer the question using the context below.
-        If the answer is not in the context, say "I don't know".
-
-        Context:
-        {context}
-
-        Question:
-        {query}
-
-        Answer:
-        """
-
-        res = client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        answer = res.choices[0].message.content
-
-        sources = [doc.metadata.get("source", "Unknown") for doc in docs]
-
-        return answer, sources
-
-    except Exception as e:
-        return f"❌ Error: {str(e)}", []
-
-# -------------------- BUILD VECTORSTORE --------------------
 if uploaded_files:
-    with st.spinner("📚 Processing PDFs..."):
-        st.session_state.vectorstore = process_pdfs(uploaded_files)
-    st.success("✅ PDFs processed successfully!")
+    if st.button("Process PDFs"):
+        with st.spinner("Processing PDFs..."):
+            documents = extract_text_from_pdfs(uploaded_files)
 
-# -------------------- CHAT INPUT --------------------
-query = st.chat_input("Ask something about your PDF...")
+            if not documents:
+                st.session_state.vector_index = None
+                st.session_state.chunk_records = []
+                st.warning("No readable text was found in the uploaded PDFs.")
+            else:
+                index, chunk_records = build_vectorstore(documents)
+                st.session_state.vector_index = index
+                st.session_state.chunk_records = chunk_records
+                st.success("PDFs processed successfully.")
 
-# -------------------- CHAT LOGIC --------------------
+
+query = st.chat_input("Ask something about your PDFs...")
+
 if query:
+    st.session_state.chat_history.append(("user", query, None))
+
     if not groq_api_key:
-        st.error("❌ Please enter your Groq API key in sidebar.")
-    elif st.session_state.vectorstore is None:
-        st.error("❌ Please upload PDFs first.")
+        answer = "Please enter your Groq API key in the sidebar."
+        sources = []
+    elif st.session_state.vector_index is None:
+        answer = "Please upload and process at least one PDF first."
+        sources = []
     else:
-        client = Groq(api_key=groq_api_key)
+        try:
+            answer, sources = generate_rag_answer(
+                query,
+                groq_api_key,
+                st.session_state.vector_index,
+                st.session_state.chunk_records,
+            )
+        except Exception as exc:
+            answer = f"Error while generating an answer: {exc}"
+            sources = []
 
-        answer, sources = rag_answer(query, st.session_state.vectorstore, client)
+    st.session_state.chat_history.append(("assistant", answer, sources))
 
-        st.session_state.chat_history.append(("user", query))
-        st.session_state.chat_history.append(("ai", answer, sources))
 
-# -------------------- DISPLAY CHAT --------------------
-for chat in st.session_state.chat_history:
-    if chat[0] == "user":
-        with st.chat_message("user"):
-            st.markdown(chat[1])
+for role, content, sources in st.session_state.chat_history:
+    with st.chat_message("user" if role == "user" else "assistant"):
+        st.markdown(content)
 
-    elif chat[0] == "ai":
-        with st.chat_message("assistant"):
-            st.markdown(chat[1])
-
-            if len(chat) > 2 and chat[2]:
-                with st.expander("📚 Sources"):
-                    for src in chat[2]:
-                        st.write(f"• {src}")
+        if role == "assistant" and sources:
+            with st.expander("Sources"):
+                for item in sources:
+                    pages = ", ".join(str(page) for page in item["pages"][:5])
+                    suffix = "..." if len(item["pages"]) > 5 else ""
+                    st.write(f"- {item['source']} (pages: {pages}{suffix})")
