@@ -275,24 +275,25 @@ Question:
     return answer, retrieved_chunks
 
 
-st.set_page_config(page_title="RAG AI Assistant", page_icon="📄", layout="wide")
+st.set_page_config(page_title="RAG AI Assistant", page_icon="📚", layout="wide")
 
-st.sidebar.title("Settings")
+st.sidebar.title("⚙️ Settings")
 configured_api_key = get_configured_api_key()
 
 if configured_api_key:
     groq_api_key = configured_api_key
-    st.sidebar.success("Groq API key loaded automatically.")
+    st.sidebar.success("🔐 Groq API key loaded automatically.")
 else:
-    groq_api_key = st.sidebar.text_input("Enter Groq API Key", type="password")
-    st.sidebar.caption("Tip: set GROQ_API_KEY in .env or Streamlit secrets to preload it.")
+    groq_api_key = st.sidebar.text_input("🔑 Enter Groq API Key", type="password")
+    st.sidebar.caption("💡 Tip: set GROQ_API_KEY in `.env` or Streamlit secrets to preload it.")
 
-answer_mode = st.sidebar.radio("Answer mode", ANSWER_MODES)
+answer_mode = st.sidebar.radio("🧠 Answer mode", ANSWER_MODES)
 
-st.title("AI PDF Assistant")
-st.markdown("Upload one or more PDFs and choose whether answers come from the PDF, the AI model, or both.")
+st.title("🤖 AI PDF Assistant")
+st.markdown("### ✨ Turn your PDFs into a smart research companion with grounded answers, AI insights, or both together.")
+st.info(f"📌 Current answer mode: **{answer_mode}**")
 
-uploaded_files = st.file_uploader("Upload PDFs", type=["pdf"], accept_multiple_files=True)
+uploaded_files = st.file_uploader("📄 Upload your PDF files", type=["pdf"], accept_multiple_files=True)
 
 if "vector_index" not in st.session_state:
     st.session_state.vector_index = None
@@ -305,34 +306,34 @@ if "chat_history" not in st.session_state:
 
 
 if uploaded_files:
-    if st.button("Process PDFs"):
-        with st.spinner("Processing PDFs..."):
+    if st.button("🚀 Process PDFs"):
+        with st.spinner("📚 Processing PDFs..."):
             documents = extract_text_from_pdfs(uploaded_files)
 
             if not documents:
                 st.session_state.vector_index = None
                 st.session_state.chunk_records = []
-                st.warning("No readable text was found in the uploaded PDFs.")
+                st.warning("⚠️ No readable text was found in the uploaded PDFs.")
             else:
                 index, chunk_records = build_vectorstore(documents)
                 st.session_state.vector_index = index
                 st.session_state.chunk_records = chunk_records
-                st.success("PDFs processed successfully.")
+                st.success("✅ PDFs processed successfully.")
 
 
-query = st.chat_input("Ask something about your PDFs...")
+query = st.chat_input("💬 Ask something about your PDFs...")
 
 if query:
     st.session_state.chat_history.append(("user", query, None))
 
     if not groq_api_key:
-        answer = "Please enter your Groq API key in the sidebar."
+        answer = "🔑 Please enter your Groq API key in the sidebar."
         sources = []
     else:
         try:
             if answer_mode == "PDF only":
                 if st.session_state.vector_index is None:
-                    answer = "Please upload and process at least one PDF first."
+                    answer = "📄 Please upload and process at least one PDF first."
                     sources = []
                 else:
                     answer, sources = generate_pdf_answer(
@@ -351,10 +352,10 @@ if query:
                     st.session_state.chunk_records,
                 )
         except Exception as exc:
-            answer = f"Error while generating an answer: {exc}"
+            answer = f"❌ Error while generating an answer: {exc}"
             sources = []
 
-    st.session_state.chat_history.append(("assistant", f"Mode: {answer_mode}\n\n{answer}", sources))
+    st.session_state.chat_history.append(("assistant", f"📌 Mode selected: {answer_mode}\n\n{answer}", sources))
 
 
 for role, content, sources in st.session_state.chat_history:
@@ -362,22 +363,22 @@ for role, content, sources in st.session_state.chat_history:
         st.markdown(content)
 
         show_sources = role == "assistant" and should_show_sources(content, sources)
-        if show_sources and "Mode: AI + PDF" in content:
+        if show_sources and "Mode selected: AI + PDF" in content:
             show_sources = combined_answer_has_pdf_evidence(content)
 
         if show_sources:
-            with st.expander(f"Sources and evidence ({len(sources)})"):
-                st.caption("These PDF excerpts were retrieved to support the answer.")
+            with st.expander(f"📚 Sources and evidence ({len(sources)})"):
+                st.caption("📝 These PDF excerpts were retrieved to support the answer.")
                 for index, item in enumerate(sources, start=1):
                     st.markdown(
                         f"""
-**Source {index}: {item['source']}**
+**📎 Source {index}: {item['source']}**
 
 `{format_pages(item['pages'])}` | `{len(item['content'])} characters retrieved`
 
-**Why this matters:** This is one of the most relevant PDF passages matched to your question.
+**🔍 Why this matters:** This is one of the most relevant PDF passages matched to your question.
 
-**Preview:** {format_source_preview(item['content'])}
+**👀 Preview:** {format_source_preview(item['content'])}
 """
                     )
                     if index != len(sources):
