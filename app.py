@@ -120,4 +120,6 @@ for chat in st.session_state.chat_history:
             if len(chat) > 2 and chat[2]:
                 with st.expander("📚 Sources"):
                     for src in chat[2]:
-                        st.write(f"• {src}")
+                        st.write(f"• {src}")git add .
+git commit -m "update"
+git push
