@@ -1,239 +1,123 @@
 import streamlit as st
-import streamlit.components.v1 as components
-import faiss
-import numpy as np
-import os
-import re
-from PyPDF2 import PdfReader
-from sentence_transformers import SentenceTransformer
 from groq import Groq
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import FAISS
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.document_loaders import PyPDFLoader
+import os
 
-# ================= CONFIG =================
-st.set_page_config(page_title="RAGenius AI", page_icon="🤖", layout="wide")
+# -------------------- CONFIG --------------------
+st.set_page_config(page_title="RAG AI Assistant", page_icon="🤖", layout="wide")
 
-# ================= UI STYLE =================
-st.markdown("""
-<style>
-.chat-card {
-    padding: 12px;
-    border-radius: 12px;
-    margin-bottom: 10px;
-}
-.user-card {
-    background-color: #1e293b;
-    border-left: 5px solid #38bdf8;
-}
-.ai-card {
-    background-color: #0f172a;
-    border-left: 5px solid #4CAF50;
-}
-.pdf-card {
-    background-color: #0f172a;
-    border-left: 5px solid orange;
-}
-</style>
-""", unsafe_allow_html=True)
+# -------------------- SIDEBAR --------------------
+st.sidebar.title("⚙️ Settings")
+groq_api_key = st.sidebar.text_input("Enter Groq API Key", type="password")
 
-st.title("🤖 RAGenius AI")
-st.caption("Smart PDF + AI Assistant")
+# -------------------- TITLE --------------------
+st.title("🤖 AI PDF Assistant (RAG)")
+st.markdown("Ask questions based on your uploaded PDFs")
 
-# ================= API =================
-API_KEY = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
-client = Groq(api_key=API_KEY)
+# -------------------- FILE UPLOAD --------------------
+uploaded_files = st.file_uploader("📄 Upload PDFs", type="pdf", accept_multiple_files=True)
 
-embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+# -------------------- INIT SESSION --------------------
+if "vectorstore" not in st.session_state:
+    st.session_state.vectorstore = None
 
-# ================= SESSION =================
-if "index" not in st.session_state:
-    st.session_state.index = None
-    st.session_state.chunks = None
-    st.session_state.chat = []
-    st.session_state.clicked_query = None
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-# ================= MODE =================
-mode = st.selectbox("Mode", ["Both", "PDF Only", "AI Only"])
+# -------------------- PROCESS PDFs --------------------
+def process_pdfs(files):
+    documents = []
 
-# ================= FUNCTIONS =================
+    for file in files:
+        with open(file.name, "wb") as f:
+            f.write(file.getbuffer())
 
-def extract_text(file):
-    reader = PdfReader(file)
-    return "".join([p.extract_text() or "" for p in reader.pages])
+        loader = PyPDFLoader(file.name)
+        docs = loader.load()
+        documents.extend(docs)
 
-def chunk_text(text, size=800, overlap=200):
-    chunks, start = [], 0
-    while start < len(text):
-        chunks.append(text[start:start+size])
-        start += size - overlap
-    return chunks
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_documents(documents)
 
-def create_index(chunks):
-    emb = embed_model.encode(chunks)
-    index = faiss.IndexFlatL2(emb.shape[1])
-    index.add(np.array(emb))
-    return index
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
 
-def retrieve(query, k=6):
-    emb = embed_model.encode([query])
-    D, I = st.session_state.index.search(np.array(emb), k)
+    return vectorstore
 
-    results = []
-    for idx, i in enumerate(I[0]):
-        similarity = 1 / (1 + float(D[0][idx]))
-        results.append((st.session_state.chunks[i], similarity))
+# -------------------- RAG FUNCTION --------------------
+def rag_answer(query, vectorstore, client):
+    if not query or query.strip() == "":
+        return "⚠️ Please enter a valid question.", []
 
-    return results
+    try:
+        docs = vectorstore.similarity_search(query, k=3)
 
-def is_relevant(results, threshold=0.35):
-    return sum(score for _, score in results)/len(results) > threshold
+        context = "\n\n".join([doc.page_content for doc in docs])
 
-def format_sources(results):
-    return [(i+1, txt[:300], round(score*100,2)) for i,(txt,score) in enumerate(results)]
+        prompt = f"""
+        Answer the question using the context below.
+        If the answer is not in the context, say "I don't know".
 
-# ================= SUGGESTIONS =================
+        Context:
+        {context}
 
-def suggest_queries():
-    if not st.session_state.chunks:
-        return ["Upload a PDF first", "Ask document questions", "Switch to AI mode"]
-    return ["Give summary", "Explain main concept", "List key points"]
+        Question:
+        {query}
 
-# ================= AI =================
+        Answer:
+        """
 
-def rag_answer(query):
-    results = retrieve(query)
-    if not is_relevant(results):
-        return None, None
+        res = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}]
+        )
 
-    sources = format_sources(results)
-    context = "\n\n".join([f"[{i}] {t}" for i,t,_ in sources])
+        answer = res.choices[0].message.content
 
-    prompt = f"""
-Answer ONLY from context.
+        sources = [doc.metadata.get("source", "Unknown") for doc in docs]
 
-### 📘 Definition
-...
+        return answer, sources
 
-### 🔑 Key Points
-- ...
-- ...
+    except Exception as e:
+        return f"❌ Error: {str(e)}", []
 
-### 📌 Explanation
-...
+# -------------------- BUILD VECTORSTORE --------------------
+if uploaded_files:
+    with st.spinner("📚 Processing PDFs..."):
+        st.session_state.vectorstore = process_pdfs(uploaded_files)
+    st.success("✅ PDFs processed successfully!")
 
-Use citations [1], [2].
+# -------------------- CHAT INPUT --------------------
+query = st.chat_input("Ask something about your PDF...")
 
-Context:
-{context}
-
-Question: {query}
-Answer:
-"""
-
-    res = client.chat.completions.create(
-        model="llama-3.1-70b-versatile",
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return res.choices[0].message.content, sources
-
-
-def general_answer(query):
-    prompt = f"""
-Answer in structured Markdown:
-
-### 📘 Definition
-...
-
-### 🔑 Key Points
-- ...
-- ...
-
-### 📌 Explanation
-...
-
-### 🌍 Examples
-- ...
-
-Question: {query}
-Answer:
-"""
-
-    res = client.chat.completions.create(
-        model="llama-3.1-70b-versatile",
-        messages=[{"role": "user", "content": prompt}]
-    )
-
-    return res.choices[0].message.content
-
-# ================= UI =================
-
-uploaded = st.file_uploader("📂 Upload PDF", type=["pdf"])
-
-if uploaded and st.button("Process PDF"):
-    text = extract_text(uploaded)
-    chunks = chunk_text(text)
-    st.session_state.index = create_index(chunks)
-    st.session_state.chunks = chunks
-    st.success("✅ PDF processed")
-
-query = st.chat_input("Ask something...")
-
-if st.session_state.clicked_query:
-    query = st.session_state.clicked_query
-    st.session_state.clicked_query = None
-
+# -------------------- CHAT LOGIC --------------------
 if query:
-    st.session_state.chat.append(("user", query))
-
-    has_pdf = st.session_state.index is not None
-    pdf_ans, sources = (None, None)
-    ai_ans = None
-
-    if has_pdf:
-        pdf_ans, sources = rag_answer(query)
-
-    if mode in ["Both", "AI Only"] or (mode=="PDF Only" and not pdf_ans):
-        ai_ans = general_answer(query)
-
-    if mode == "Both":
-        if pdf_ans:
-            st.session_state.chat.append(("pdf", pdf_ans))
-            st.session_state.chat.append(("sources", sources))
-        if ai_ans:
-            st.session_state.chat.append(("ai", ai_ans))
-
-    elif mode == "PDF Only":
-        if pdf_ans:
-            st.session_state.chat.append(("pdf", pdf_ans))
-            st.session_state.chat.append(("sources", sources))
-        else:
-            st.session_state.chat.append(("pdf", "❌ Out of document scope"))
-            st.session_state.chat.append(("suggestions", suggest_queries()))
-
+    if not groq_api_key:
+        st.error("❌ Please enter your Groq API key in sidebar.")
+    elif st.session_state.vectorstore is None:
+        st.error("❌ Please upload PDFs first.")
     else:
-        st.session_state.chat.append(("ai", ai_ans))
+        client = Groq(api_key=groq_api_key)
 
-# ================= DISPLAY =================
+        answer, sources = rag_answer(query, st.session_state.vectorstore, client)
 
-for item in st.session_state.chat:
+        st.session_state.chat_history.append(("user", query))
+        st.session_state.chat_history.append(("ai", answer, sources))
 
-    if item[0] == "user":
-        st.markdown(f"<div class='chat-card user-card'>👤 {item[1]}</div>", unsafe_allow_html=True)
+# -------------------- DISPLAY CHAT --------------------
+for chat in st.session_state.chat_history:
+    if chat[0] == "user":
+        with st.chat_message("user"):
+            st.markdown(chat[1])
 
-    elif item[0] == "pdf":
-        st.markdown("<div class='chat-card pdf-card'>📄 Answer from Document</div>", unsafe_allow_html=True)
-        st.markdown(item[1])  # ✅ FIXED
+    elif chat[0] == "ai":
+        with st.chat_message("assistant"):
+            st.markdown(chat[1])
 
-    elif item[0] == "ai":
-        st.markdown("<div class='chat-card ai-card'>🤖 AI Answer</div>", unsafe_allow_html=True)
-        st.markdown(item[1])  # ✅ FIXED
-
-    elif item[0] == "sources":
-        st.markdown("### 📖 Sources")
-        for i, txt, conf in item[1]:
-            st.markdown(f"**[{i}] ({conf}%)** {txt}")
-
-    elif item[0] == "suggestions":
-        st.markdown("### 💡 Suggestions")
-        for q in item[1]:
-            if st.button(q):
-                st.session_state.clicked_query = q
+            if len(chat) > 2 and chat[2]:
+                with st.expander("📚 Sources"):
+                    for src in chat[2]:
+                        st.write(f"• {src}")
