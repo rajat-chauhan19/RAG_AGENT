@@ -135,6 +135,24 @@ def format_source_preview(text, max_length=260):
     return preview[: max_length - 3].rstrip() + "..."
 
 
+def should_show_sources(answer, sources):
+    if not sources:
+        return False
+
+    normalized_answer = answer.lower()
+    no_context_signals = [
+        "i don't know",
+        "i do not know",
+        "not present in the context",
+        "out of context",
+        "no relevant pdf evidence",
+        "no relevant pdf context",
+        "cannot be determined from the uploaded pdf",
+        "can't be determined from the uploaded pdf",
+    ]
+    return not any(signal in normalized_answer for signal in no_context_signals)
+
+
 def generate_pdf_answer(query, api_key, index, chunk_records):
     if not query.strip():
         return "Please enter a valid question.", []
@@ -180,7 +198,12 @@ def generate_ai_answer(query, api_key):
     client = get_groq_client(api_key)
     prompt = f"""
 You are a helpful AI assistant.
-Answer the user's question clearly and directly using your general knowledge.
+Answer the user's question using your general knowledge.
+Write in a well-structured style:
+- Start with a short introductory paragraph.
+- Then use bullet points for the main ideas, steps, or facts when helpful.
+- End with a short closing paragraph if clarification or context would help.
+Avoid one-line or overly blunt answers.
 
 Question:
 {query}
@@ -217,6 +240,10 @@ Answer the user's question by combining:
 
 Be explicit when a point comes from the PDF context versus general AI knowledge.
 If no PDF context is available, answer using general knowledge and mention that no PDF evidence was found.
+Write the answer in a polished structure:
+- Begin with a short summary paragraph.
+- Use bullet points to separate PDF-based points from general AI knowledge where appropriate.
+- Keep the tone clear, explanatory, and not overly brief.
 
 PDF Context:
 {context if context else "No relevant PDF context found."}
@@ -326,7 +353,7 @@ for role, content, sources in st.session_state.chat_history:
     with st.chat_message("user" if role == "user" else "assistant"):
         st.markdown(content)
 
-        if role == "assistant" and sources:
+        if role == "assistant" and should_show_sources(content, sources):
             with st.expander(f"Sources and evidence ({len(sources)})"):
                 st.caption("These PDF excerpts were retrieved to support the answer.")
                 for index, item in enumerate(sources, start=1):
